@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, session
+from flask import Flask, request, jsonify, session, make_response
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 import yfinance as yf
@@ -15,7 +15,27 @@ from contextlib import contextmanager
 
 app = Flask(__name__)
 app.secret_key = 'your-secret-key-change-this-in-production'
-CORS(app, supports_credentials=True)
+
+# Configure CORS properly
+CORS(app, 
+     origins=[
+         "https://ai-investment-advisor-m4b9.vercel.app",
+         "https://ai-investment-advisor.vercel.app", 
+         "http://localhost:3000"
+     ],
+     supports_credentials=True,
+     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+     allow_headers=["Content-Type", "Authorization", "X-Requested-With"])
+
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        response = make_response()
+        response.headers.add("Access-Control-Allow-Origin", "https://ai-investment-advisor-m4b9.vercel.app")
+        response.headers.add("Access-Control-Allow-Headers", "*")
+        response.headers.add("Access-Control-Allow-Methods", "*")
+        response.headers.add("Access-Control-Allow-Credentials", "true")
+        return response
 
 # Database Configuration
 DATABASE = 'investment_advisor.db'
