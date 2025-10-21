@@ -20,7 +20,7 @@ app.secret_key = 'your-secret-key-change-this-in-production'
 CORS(app, 
      origins=[
          "https://ai-investment-advisor-m4b9.vercel.app",
-          "https://ai-investment-advisor-i2kh.vercel.app", 
+              "https://ai-investment-advisor-i2kh-j3kqoeecs-dhruvi-shahs-projects.vercel.app",
          "https://ai-investment-advisor.vercel.app", 
          "http://localhost:3000"
      ],
