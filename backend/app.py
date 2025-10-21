@@ -14,29 +14,48 @@ import sqlite3
 from contextlib import contextmanager
 
 app = Flask(__name__)
-app.secret_key = 'your-secret-key-change-this-in-production'
+
+# IMPORTANT: Use environment variable for secret key in production
+app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key-change-this-in-production')
+
+# Session configuration for cross-origin cookies
+app.config['SESSION_COOKIE_SAMESITE'] = 'None'
+app.config['SESSION_COOKIE_SECURE'] = True  # Required for SameSite=None
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 
 # Configure CORS properly
 CORS(app, 
      origins=[
          "https://ai-investment-advisor-m4b9.vercel.app",
-              "https://ai-investment-advisor-i2kh-j3kqoeecs-dhruvi-shahs-projects.vercel.app",
+         "https://ai-investment-advisor-i2kh-j3kqoeecs-dhruvi-shahs-projects.vercel.app",
+         "https://ai-investment-advisor-i2kh-51g31piju-dhruvi-shahs-projects.vercel.app/"
          "https://ai-investment-advisor.vercel.app", 
-         "http://localhost:3000"
+         "http://localhost:3000",
+         "http://localhost:3001"
      ],
      supports_credentials=True,
      methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-     allow_headers=["Content-Type", "Authorization", "X-Requested-With"])
+     allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
+     expose_headers=["Content-Type"])
 
-@app.before_request
-def handle_preflight():
-    if request.method == "OPTIONS":
-        response = make_response()
-        response.headers.add("Access-Control-Allow-Origin", "https://ai-investment-advisor-m4b9.vercel.app")
-        response.headers.add("Access-Control-Allow-Headers", "*")
-        response.headers.add("Access-Control-Allow-Methods", "*")
-        response.headers.add("Access-Control-Allow-Credentials", "true")
-        return response
+@app.after_request
+def after_request(response):
+    origin = request.headers.get('Origin')
+    allowed_origins = [
+        "https://ai-investment-advisor-m4b9.vercel.app",
+        "https://ai-investment-advisor-i2kh-j3kqoeecs-dhruvi-shahs-projects.vercel.app",
+       "https://ai-investment-advisor-i2kh-51g31piju-dhruvi-shahs-projects.vercel.app/" 
+        "https://ai-investment-advisor.vercel.app",
+        "http://localhost:3000",
+        "http://localhost:3001"
+    ]
+    if origin in allowed_origins:
+        response.headers.add('Access-Control-Allow-Origin', origin)
+        response.headers.add('Access-Control-Allow-Credentials', 'true')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With')
+        response.headers.add('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS')
+    return response
 
 # Database Configuration
 DATABASE = 'investment_advisor.db'
@@ -88,7 +107,7 @@ def init_database():
             )
         ''')
         
-        # Analysis history table (optional - to track analysis over time)
+        # Analysis history table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS analysis_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -230,7 +249,7 @@ class Database:
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
 
-# AI Analysis Engine (same as before)
+# AI Analysis Engine
 class AdvancedAIAdvisor:
     @staticmethod
     def fetch_stock_data(ticker, period="2y"):
@@ -715,8 +734,8 @@ class AdvancedAIAdvisor:
         
         return sorted(actions, key=lambda x: {'High': 0, 'Medium': 1, 'Low': 2}[x['priority']])
 
-# Auth routes
-@app.route('/api/register', methods=['POST'])
+# Auth routes (NO /api prefix)
+@app.route('/register', methods=['POST'])
 def register():
     data = request.json
     username = data.get('username')
@@ -735,7 +754,7 @@ def register():
     
     return jsonify({'success': True, 'message': 'Registration successful', 'user_id': user_id})
 
-@app.route('/api/login', methods=['POST'])
+@app.route('/login', methods=['POST'])
 def login():
     data = request.json
     username = data.get('username')
@@ -768,13 +787,13 @@ def login():
         'user_id': user['id']
     })
 
-@app.route('/api/logout', methods=['POST'])
+@app.route('/logout', methods=['POST'])
 def logout():
     session.pop('user_id', None)
     session.pop('username', None)
     return jsonify({'success': True, 'message': 'Logged out'})
 
-@app.route('/api/check-auth', methods=['GET'])
+@app.route('/check-auth', methods=['GET'])
 def check_auth():
     user_id = session.get('user_id')
     username = session.get('username')
@@ -784,8 +803,8 @@ def check_auth():
         'user_id': user_id
     })
 
-# Portfolio routes
-@app.route('/api/portfolio', methods=['GET'])
+# Portfolio routes (NO /api prefix)
+@app.route('/portfolio', methods=['GET'])
 def get_portfolio():
     user_id = session.get('user_id')
     if not user_id:
@@ -794,7 +813,7 @@ def get_portfolio():
     portfolio = Database.get_portfolio(user_id)
     return jsonify({'success': True, 'portfolio': portfolio})
 
-@app.route('/api/portfolio/add', methods=['POST'])
+@app.route('/portfolio/add', methods=['POST'])
 def add_stock():
     user_id = session.get('user_id')
     if not user_id:
@@ -820,7 +839,7 @@ def add_stock():
         'stock_id': stock_id
     })
 
-@app.route('/api/portfolio/remove', methods=['POST'])
+@app.route('/portfolio/remove', methods=['POST'])
 def remove_stock():
     user_id = session.get('user_id')
     if not user_id:
@@ -837,7 +856,7 @@ def remove_stock():
     else:
         return jsonify({'success': False, 'message': 'Stock not found in portfolio'}), 404
 
-@app.route('/api/portfolio/update', methods=['POST'])
+@app.route('/portfolio/update', methods=['POST'])
 def update_stock():
     user_id = session.get('user_id')
     if not user_id:
@@ -856,8 +875,8 @@ def update_stock():
     else:
         return jsonify({'success': False, 'message': 'Stock not found'}), 404
 
-# AI Analysis routes
-@app.route('/api/analyze', methods=['GET'])
+# AI Analysis routes (NO /api prefix)
+@app.route('/analyze', methods=['GET'])
 def analyze_portfolio():
     user_id = session.get('user_id')
     if not user_id:
@@ -883,7 +902,7 @@ def analyze_portfolio():
     
     return jsonify({'success': True, 'analysis': analysis})
 
-@app.route('/api/analysis-history', methods=['GET'])
+@app.route('/analysis-history', methods=['GET'])
 def get_analysis_history():
     user_id = session.get('user_id')
     if not user_id:
@@ -896,7 +915,7 @@ def get_analysis_history():
     
     return jsonify({'success': True, 'history': history})
 
-@app.route('/api/rebalance', methods=['GET'])
+@app.route('/rebalance', methods=['GET'])
 def get_rebalancing():
     """Portfolio rebalancing recommendations"""
     user_id = session.get('user_id')
@@ -975,7 +994,7 @@ def get_rebalancing():
         }
     })
 
-@app.route('/api/stock-search', methods=['GET'])
+@app.route('/stock-search', methods=['GET'])
 def search_stock():
     ticker = request.args.get('ticker', '').upper()
     if not ticker:
@@ -998,8 +1017,8 @@ def search_stock():
         }
     })
 
-# Database info route
-@app.route('/api/db-info', methods=['GET'])
+# Database info route (NO /api prefix)
+@app.route('/db-info', methods=['GET'])
 def get_db_info():
     """Get database statistics"""
     user_id = session.get('user_id')
@@ -1029,13 +1048,37 @@ def get_db_info():
         'database_file': DATABASE
     })
 
+# Health check route
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({'status': 'healthy', 'message': 'AI Investment Advisor API is running'}), 200
+
+# Root route
+@app.route('/', methods=['GET'])
+def root():
+    return jsonify({
+        'message': 'AI Investment Advisor API',
+        'version': '1.0',
+        'endpoints': {
+            'auth': ['/register', '/login', '/logout', '/check-auth'],
+            'portfolio': ['/portfolio', '/portfolio/add', '/portfolio/remove', '/portfolio/update'],
+            'analysis': ['/analyze', '/analysis-history', '/rebalance', '/stock-search'],
+            'info': ['/db-info', '/health']
+        }
+    }), 200
+
 if __name__ == '__main__':
     # Initialize database on startup
     print("🔧 Initializing database...")
     init_database()
     
     print("\n🚀 Advanced AI Investment Advisor Backend Starting...")
-    print("📊 Server running on http://localhost:5000")
+    
+    # For production on Render
+    port = int(os.environ.get('PORT', 5000))
+    debug = os.environ.get('FLASK_ENV') != 'production'
+    
+    print(f"📊 Server running on port {port}")
     print("\n💾 DATABASE FEATURES:")
     print("   ✓ SQLite database for persistent storage")
     print("   ✓ User authentication & registration")
@@ -1058,4 +1101,4 @@ if __name__ == '__main__':
     print("\n✅ Ready to analyze your portfolio with advanced AI!")
     print("=" * 60)
     
-    app.run(debug=True, port=5000)
+    app.run(host='0.0.0.0', port=port, debug=debug)
