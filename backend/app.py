@@ -12,6 +12,7 @@ from scipy import stats
 from sklearn.linear_model import LinearRegression
 import sqlite3
 from contextlib import contextmanager
+import re
 
 app = Flask(__name__)
 
@@ -24,37 +25,47 @@ app.config['SESSION_COOKIE_SECURE'] = True  # Required for SameSite=None
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 
-# Configure CORS properly
+# Configure CORS to accept all Vercel URLs dynamically
 CORS(app, 
-     origins=[
-         "https://ai-investment-advisor-m4b9.vercel.app",
-         "https://ai-investment-advisor-i2kh-j3kqoeecs-dhruvi-shahs-projects.vercel.app",
-         "https://ai-investment-advisor-i2kh-51g31piju-dhruvi-shahs-projects.vercel.app/"
-         "https://ai-investment-advisor.vercel.app", 
-         "http://localhost:3000",
-         "http://localhost:3001"
-     ],
+     origins=["http://localhost:3000", "http://localhost:3001"],  # Keep localhost for development
      supports_credentials=True,
      methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
      allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
      expose_headers=["Content-Type"])
 
+def is_allowed_origin(origin):
+    """Check if origin is allowed (localhost or any Vercel deployment)"""
+    if not origin:
+        return False
+    
+    # Allow localhost
+    if origin.startswith('http://localhost:'):
+        return True
+    
+    # Allow any Vercel deployment URL
+    # Patterns: *.vercel.app, *-username.vercel.app, *.vercel.app/*, etc.
+    vercel_patterns = [
+        r'^https://.*\.vercel\.app$',  # Main pattern: https://anything.vercel.app
+        r'^https://.*-.*\.vercel\.app$',  # With hyphens
+    ]
+    
+    for pattern in vercel_patterns:
+        if re.match(pattern, origin):
+            return True
+    
+    return False
+
 @app.after_request
 def after_request(response):
+    """Dynamically handle CORS for any Vercel URL"""
     origin = request.headers.get('Origin')
-    allowed_origins = [
-        "https://ai-investment-advisor-m4b9.vercel.app",
-        "https://ai-investment-advisor-i2kh-j3kqoeecs-dhruvi-shahs-projects.vercel.app",
-       "https://ai-investment-advisor-i2kh-51g31piju-dhruvi-shahs-projects.vercel.app" 
-        "https://ai-investment-advisor.vercel.app",
-        "http://localhost:3000",
-        "http://localhost:3001"
-    ]
-    if origin in allowed_origins:
-        response.headers.add('Access-Control-Allow-Origin', origin)
-        response.headers.add('Access-Control-Allow-Credentials', 'true')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With')
-        response.headers.add('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS')
+    
+    if origin and is_allowed_origin(origin):
+        response.headers['Access-Control-Allow-Origin'] = origin
+        response.headers['Access-Control-Allow-Credentials'] = 'true'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type,Authorization,X-Requested-With'
+        response.headers['Access-Control-Allow-Methods'] = 'GET,POST,PUT,DELETE,OPTIONS'
+    
     return response
 
 # Database Configuration
