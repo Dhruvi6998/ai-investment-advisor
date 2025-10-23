@@ -7,7 +7,7 @@ const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 export default function AIInvestmentAdvisor() {
   const [auth, setAuth] = useState({ isAuthenticated: false, username: null });
   const [authMode, setAuthMode] = useState('login');
-  const [credentials, setCredentials] = useState({ username: '', password: '' });
+  const [credentials, setCredentials] = useState({ username: '', email: '', password: '' });
   const [showPassword, setShowPassword] = useState(false);
   
   const [portfolio, setPortfolio] = useState([]);
@@ -62,7 +62,7 @@ export default function AIInvestmentAdvisor() {
           showNotification('Welcome back!', 'success');
           loadPortfolio();
         }
-        setCredentials({ username: '', password: '' });
+        setCredentials({ username: '', email: '', password: '' });
       } else {
         showNotification(data.message, 'error');
       }
@@ -180,14 +180,13 @@ export default function AIInvestmentAdvisor() {
     try {
       const response = await fetch(`${API_URL}/rebalance`, { credentials: 'include' });
       const data = await response.json();
-      console.log('Full rebalancing response:', data); // Debug
-      console.log('Rebalancing data:', data.rebalancing); // Debug
+      console.log('Full rebalancing response:', data);
+      console.log('Rebalancing data:', data.rebalancing);
       
       if (data.success && data.rebalancing) {
         setRebalancing(data.rebalancing);
         showNotification('Rebalancing analysis complete!', 'success');
       } else if (data.success && data.rebalancing === false) {
-        // Handle case where rebalancing_needed is false
         setRebalancing({ rebalancing_needed: false, message: 'Need at least 2 stocks' });
         showNotification('Not enough stocks for rebalancing', 'error');
       } else {
@@ -287,6 +286,20 @@ export default function AIInvestmentAdvisor() {
                 required
               />
             </div>
+            
+            {authMode === 'register' && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Email</label>
+                <input
+                  type="email"
+                  value={credentials.email}
+                  onChange={(e) => setCredentials({ ...credentials, email: e.target.value })}
+                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  required
+                />
+              </div>
+            )}
+            
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">Password</label>
               <div className="relative">
@@ -1226,7 +1239,7 @@ export default function AIInvestmentAdvisor() {
                   </div>
                 )}
 
-                {/* Rebalancing Actions - FIXED: Safely access nested rebalancing object */}
+                {/* Rebalancing Actions */}
                 {rebalancing.rebalancing && rebalancing.rebalancing.rebalancing_needed && rebalancing.rebalancing.actions && (
                   <div>
                     <h3 className="font-bold text-gray-900 text-lg mb-4">🎯 Recommended Rebalancing Actions</h3>
