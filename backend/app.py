@@ -13,65 +13,48 @@ from sklearn.linear_model import LinearRegression
 import sqlite3
 from contextlib import contextmanager
 import re
+import time
 
 app = Flask(__name__)
 
-# IMPORTANT: Use environment variable for secret key in production
+# Secret key for sessions
 app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key-change-this-in-production')
 
-# Session configuration for cross-origin cookies
+# Session settings
 app.config['SESSION_COOKIE_SAMESITE'] = 'None'
-app.config['SESSION_COOKIE_SECURE'] = True  # Required for SameSite=None
+app.config['SESSION_COOKIE_SECURE'] = True
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 
-# Configure CORS to accept all Vercel URLs dynamically
-CORS(app, 
-     origins=["http://localhost:3000", "http://localhost:3001"],  # Keep localhost for development
-     supports_credentials=True,
-     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-     allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
-     expose_headers=["Content-Type"])
+# Initialize CORS
+CORS(app, supports_credentials=True)
 
 def is_allowed_origin(origin):
-    """Check if origin is allowed (localhost or any Vercel deployment)"""
+    """Allow localhost or *.vercel.app"""
     if not origin:
         return False
-    
-    # Allow localhost
     if origin.startswith('http://localhost:'):
         return True
-    
-    # Allow any Vercel deployment URL
-    # Patterns: *.vercel.app, *-username.vercel.app, *.vercel.app/*, etc.
     vercel_patterns = [
-        r'^https://.*\.vercel\.app$',  # Main pattern: https://anything.vercel.app
-        r'^https://.*-.*\.vercel\.app$',  # With hyphens
+        r'^https://.*\.vercel\.app$',
+        r'^https://.*-.*\.vercel\.app$',
     ]
-    
-    for pattern in vercel_patterns:
-        if re.match(pattern, origin):
-            return True
-    
-    return False
+    return any(re.match(p, origin) for p in vercel_patterns)
 
 @app.after_request
 def after_request(response):
-    """Dynamically handle CORS for any Vercel URL"""
+    """Manually allow only verified origins"""
     origin = request.headers.get('Origin')
-    
     if origin and is_allowed_origin(origin):
         response.headers['Access-Control-Allow-Origin'] = origin
         response.headers['Access-Control-Allow-Credentials'] = 'true'
         response.headers['Access-Control-Allow-Headers'] = 'Content-Type,Authorization,X-Requested-With'
         response.headers['Access-Control-Allow-Methods'] = 'GET,POST,PUT,DELETE,OPTIONS'
-    
     return response
 
 # Database Configuration
 DATABASE = 'investment_advisor.db'
 
-# Database Helper Functions
 @contextmanager
 def get_db():
     """Context manager for database connections"""
@@ -91,7 +74,6 @@ def init_database():
     with get_db() as conn:
         cursor = conn.cursor()
         
-        # Users table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -103,7 +85,6 @@ def init_database():
             )
         ''')
         
-        # Portfolio table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS portfolio (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -118,7 +99,6 @@ def init_database():
             )
         ''')
         
-        # Analysis history table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS analysis_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -134,13 +114,10 @@ def init_database():
         ''')
         
         print("✅ Database initialized successfully!")
-        print(f"📁 Database file: {DATABASE}")
 
-# Database Operations Class
 class Database:
     @staticmethod
     def get_user_by_username(username):
-        """Get user by username"""
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute('SELECT * FROM users WHERE username = ?', (username,))
@@ -148,7 +125,6 @@ class Database:
     
     @staticmethod
     def create_user(username, password, email=None):
-        """Create new user"""
         with get_db() as conn:
             cursor = conn.cursor()
             password_hash = generate_password_hash(password)
@@ -160,7 +136,6 @@ class Database:
     
     @staticmethod
     def update_last_login(user_id):
-        """Update user's last login time"""
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -170,7 +145,6 @@ class Database:
     
     @staticmethod
     def get_portfolio(user_id):
-        """Get user's portfolio"""
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -182,7 +156,6 @@ class Database:
     
     @staticmethod
     def add_stock(user_id, ticker, quantity, purchase_price, notes=None):
-        """Add stock to portfolio"""
         with get_db() as conn:
             cursor = conn.cursor()
             try:
@@ -192,7 +165,6 @@ class Database:
                 ''', (user_id, ticker, quantity, purchase_price, notes))
                 return cursor.lastrowid
             except sqlite3.IntegrityError:
-                # Stock already exists, update instead
                 cursor.execute('''
                     UPDATE portfolio 
                     SET quantity = quantity + ?, 
@@ -203,7 +175,6 @@ class Database:
     
     @staticmethod
     def remove_stock(user_id, ticker):
-        """Remove stock from portfolio"""
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -214,7 +185,6 @@ class Database:
     
     @staticmethod
     def update_stock(user_id, ticker, quantity=None, purchase_price=None):
-        """Update stock in portfolio"""
         with get_db() as conn:
             cursor = conn.cursor()
             if quantity is not None and purchase_price is not None:
@@ -231,7 +201,6 @@ class Database:
     
     @staticmethod
     def save_analysis(user_id, ticker, current_price, predicted_price, recommendation, confidence):
-        """Save analysis history"""
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute('''
@@ -242,7 +211,6 @@ class Database:
     
     @staticmethod
     def get_analysis_history(user_id, ticker=None, limit=10):
-        """Get analysis history"""
         with get_db() as conn:
             cursor = conn.cursor()
             if ticker:
@@ -260,32 +228,73 @@ class Database:
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
 
-# AI Analysis Engine
 class AdvancedAIAdvisor:
     @staticmethod
     def fetch_stock_data(ticker, period="2y"):
-        """Fetch comprehensive stock data"""
+        """Fetch comprehensive stock data with improved error handling"""
         try:
-            stock = yf.Ticker(ticker)
-            hist = stock.history(period=period)
-            info = stock.info
+            # Add delay to avoid rate limiting
+            time.sleep(0.5)
             
-            if len(hist) == 0:
-                return {'success': False, 'error': 'No data available'}
+            print(f"📊 Fetching data for {ticker}...")
+            
+            # Create ticker object
+            stock = yf.Ticker(ticker)
+            
+            # Try different periods if first attempt fails
+            periods_to_try = [period, "1y", "6mo", "3mo", "1mo", "5d"]
+            hist = None
+            
+            for p in periods_to_try:
+                try:
+                    print(f"   Trying period: {p}")
+                    hist = stock.history(period=p, timeout=15)
+                    if hist is not None and len(hist) > 0:
+                        print(f"   ✓ Success with period {p}: {len(hist)} data points")
+                        break
+                except Exception as e:
+                    print(f"   ✗ Failed with period {p}: {str(e)}")
+                    continue
+            
+            if hist is None or len(hist) == 0:
+                print(f"❌ No data available for {ticker}")
+                return {'success': False, 'error': 'No data available for this ticker'}
+            
+            # Get info with error handling
+            try:
+                info = stock.info
+                if not info or len(info) == 0:
+                    raise Exception("Empty info")
+            except Exception as e:
+                print(f"   ⚠ Using default info due to: {str(e)}")
+                info = {
+                    'sector': 'Unknown',
+                    'industry': 'Unknown',
+                    'longName': ticker,
+                    'currency': 'USD',
+                    'marketCap': 0,
+                    'trailingPE': None,
+                    'beta': 1.0
+                }
+            
+            current_price = float(hist['Close'].iloc[-1])
+            print(f"   ✓ Current price: ${current_price:.2f}")
             
             return {
                 'success': True,
                 'data': hist,
                 'info': info,
-                'current_price': hist['Close'].iloc[-1] if len(hist) > 0 else 0,
+                'current_price': current_price,
                 'sector': info.get('sector', 'Unknown'),
                 'industry': info.get('industry', 'Unknown'),
                 'market_cap': info.get('marketCap', 0),
-                'pe_ratio': info.get('trailingPE', 0),
+                'pe_ratio': info.get('trailingPE'),
                 'beta': info.get('beta', 1.0)
             }
+            
         except Exception as e:
-            return {'success': False, 'error': str(e)}
+            print(f"❌ Critical error fetching {ticker}: {str(e)}")
+            return {'success': False, 'error': f'Failed to fetch data: {str(e)}'}
     
     @staticmethod
     def calculate_rsi(prices, period=14):
@@ -343,7 +352,6 @@ class AdvancedAIAdvisor:
         
         prices = hist['Close'].values
         
-        # Linear Regression
         X = np.arange(len(prices)).reshape(-1, 1)
         y = prices
         model = LinearRegression()
@@ -352,13 +360,11 @@ class AdvancedAIAdvisor:
         future_X = np.arange(len(prices), len(prices) + days_ahead).reshape(-1, 1)
         linear_pred = model.predict(future_X)[-1]
         
-        # EMA Trend
         ema_short = hist['Close'].ewm(span=20).mean()
         ema_long = hist['Close'].ewm(span=50).mean()
         ema_trend = ema_short.iloc[-1] - ema_long.iloc[-1]
         ema_pred = prices[-1] + (ema_trend * (days_ahead / 30))
         
-        # Historical Average
         returns = hist['Close'].pct_change().dropna()
         avg_return = returns.mean()
         volatility = returns.std()
@@ -745,7 +751,7 @@ class AdvancedAIAdvisor:
         
         return sorted(actions, key=lambda x: {'High': 0, 'Medium': 1, 'Low': 2}[x['priority']])
 
-# Auth routes (NO /api prefix)
+# Auth routes
 @app.route('/register', methods=['POST'])
 def register():
     data = request.json
@@ -756,11 +762,9 @@ def register():
     if not username or not password:
         return jsonify({'success': False, 'message': 'Username and password required'}), 400
     
-    # Check if user exists
     if Database.get_user_by_username(username):
         return jsonify({'success': False, 'message': 'User already exists'}), 400
     
-    # Create user
     user_id = Database.create_user(username, password, email)
     
     return jsonify({'success': True, 'message': 'Registration successful', 'user_id': user_id})
@@ -774,20 +778,16 @@ def login():
     if not username or not password:
         return jsonify({'success': False, 'message': 'Username and password required'}), 400
     
-    # Get user
     user = Database.get_user_by_username(username)
     
     if not user:
         return jsonify({'success': False, 'message': 'User not found'}), 404
     
-    # Verify password
     if not check_password_hash(user['password'], password):
         return jsonify({'success': False, 'message': 'Invalid password'}), 401
     
-    # Update last login
     Database.update_last_login(user['id'])
     
-    # Set session
     session['user_id'] = user['id']
     session['username'] = username
     
@@ -814,7 +814,7 @@ def check_auth():
         'user_id': user_id
     })
 
-# Portfolio routes (NO /api prefix)
+# Portfolio routes
 @app.route('/portfolio', methods=['GET'])
 def get_portfolio():
     user_id = session.get('user_id')
@@ -836,12 +836,10 @@ def add_stock():
     purchase_price = float(data.get('purchase_price'))
     notes = data.get('notes', '')
     
-    # Validate stock
     stock_data = AdvancedAIAdvisor.fetch_stock_data(ticker, period="1d")
     if not stock_data['success']:
         return jsonify({'success': False, 'message': 'Invalid ticker symbol'}), 400
     
-    # Add to database
     stock_id = Database.add_stock(user_id, ticker, quantity, purchase_price, notes)
     
     return jsonify({
@@ -859,7 +857,6 @@ def remove_stock():
     data = request.json
     ticker = data.get('ticker', '').upper()
     
-    # Remove from database
     success = Database.remove_stock(user_id, ticker)
     
     if success:
@@ -878,7 +875,6 @@ def update_stock():
     quantity = data.get('quantity')
     purchase_price = data.get('purchase_price')
     
-    # Update in database
     success = Database.update_stock(user_id, ticker, quantity, purchase_price)
     
     if success:
@@ -886,20 +882,17 @@ def update_stock():
     else:
         return jsonify({'success': False, 'message': 'Stock not found'}), 404
 
-# AI Analysis routes (NO /api prefix)
+# AI Analysis routes
 @app.route('/analyze', methods=['GET'])
 def analyze_portfolio():
     user_id = session.get('user_id')
     if not user_id:
         return jsonify({'success': False, 'message': 'Not authenticated'}), 401
     
-    # Get portfolio from database
     portfolio = Database.get_portfolio(user_id)
     
-    # Run AI analysis
     analysis = AdvancedAIAdvisor.analyze_portfolio_comprehensive(portfolio)
     
-    # Save analysis to history
     for stock in analysis.get('analysis', []):
         if stock.get('prediction'):
             Database.save_analysis(
@@ -933,7 +926,6 @@ def get_rebalancing():
     if not user_id:
         return jsonify({'success': False, 'message': 'Not authenticated'}), 401
     
-    # Get portfolio from database
     portfolio = Database.get_portfolio(user_id)
     
     if not portfolio or len(portfolio) < 2:
@@ -945,7 +937,6 @@ def get_rebalancing():
             }
         })
     
-    # Calculate rebalancing
     analysis = []
     total_value = 0
     
@@ -959,17 +950,15 @@ def get_rebalancing():
             analysis.append(metrics)
             total_value += metrics['total_value']
     
-    # Calculate current weights
     for stock in analysis:
         stock['current_weight'] = (stock['total_value'] / total_value * 100) if total_value > 0 else 0
     
-    # Target: equal weight
     target_weight = 100 / len(analysis)
     rebalancing_actions = []
     
     for stock in analysis:
         diff = stock['current_weight'] - target_weight
-        if abs(diff) > 10:  # Rebalance if more than 10% off target
+        if abs(diff) > 10:
             target_value = (target_weight / 100) * total_value
             current_value = stock['total_value']
             dollar_diff = target_value - current_value
@@ -1028,7 +1017,6 @@ def search_stock():
         }
     })
 
-# Database info route (NO /api prefix)
 @app.route('/db-info', methods=['GET'])
 def get_db_info():
     """Get database statistics"""
@@ -1039,15 +1027,12 @@ def get_db_info():
     with get_db() as conn:
         cursor = conn.cursor()
         
-        # User info
         cursor.execute('SELECT username, email, created_at, last_login FROM users WHERE id = ?', (user_id,))
         user_info = dict(cursor.fetchone())
         
-        # Portfolio stats
         cursor.execute('SELECT COUNT(*) as stock_count FROM portfolio WHERE user_id = ?', (user_id,))
         portfolio_stats = dict(cursor.fetchone())
         
-        # Analysis history count
         cursor.execute('SELECT COUNT(*) as analysis_count FROM analysis_history WHERE user_id = ?', (user_id,))
         analysis_stats = dict(cursor.fetchone())
     
@@ -1059,12 +1044,10 @@ def get_db_info():
         'database_file': DATABASE
     })
 
-# Health check route
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({'status': 'healthy', 'message': 'AI Investment Advisor API is running'}), 200
 
-# Root route
 @app.route('/', methods=['GET'])
 def root():
     return jsonify({
@@ -1079,13 +1062,11 @@ def root():
     }), 200
 
 if __name__ == '__main__':
-    # Initialize database on startup
     print("🔧 Initializing database...")
     init_database()
     
     print("\n🚀 Advanced AI Investment Advisor Backend Starting...")
     
-    # For production on Render
     port = int(os.environ.get('PORT', 5000))
     debug = os.environ.get('FLASK_ENV') != 'production'
     
