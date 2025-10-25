@@ -14,6 +14,14 @@ import sqlite3
 from contextlib import contextmanager
 import re
 import time
+import requests
+
+# Configure requests session for yfinance
+session_requests = requests.Session()
+session_requests.headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+
+# Override yfinance session
+yf.Ticker._session = session_requests
 
 app = Flask(__name__)
 
@@ -232,69 +240,112 @@ class AdvancedAIAdvisor:
     @staticmethod
     def fetch_stock_data(ticker, period="2y"):
         """Fetch comprehensive stock data with improved error handling"""
-        try:
-            # Add delay to avoid rate limiting
-            time.sleep(0.5)
-            
-            print(f"📊 Fetching data for {ticker}...")
-            
-            # Create ticker object
-            stock = yf.Ticker(ticker)
-            
-            # Try different periods if first attempt fails
-            periods_to_try = [period, "1y", "6mo", "3mo", "1mo", "5d"]
-            hist = None
-            
-            for p in periods_to_try:
-                try:
-                    print(f"   Trying period: {p}")
-                    hist = stock.history(period=p, timeout=15)
-                    if hist is not None and len(hist) > 0:
-                        print(f"   ✓ Success with period {p}: {len(hist)} data points")
-                        break
-                except Exception as e:
-                    print(f"   ✗ Failed with period {p}: {str(e)}")
-                    continue
-            
-            if hist is None or len(hist) == 0:
-                print(f"❌ No data available for {ticker}")
-                return {'success': False, 'error': 'No data available for this ticker'}
-            
-            # Get info with error handling
+        max_retries = 3
+        retry_delay = 2
+        
+        for attempt in range(max_retries):
             try:
-                info = stock.info
-                if not info or len(info) == 0:
-                    raise Exception("Empty info")
-            except Exception as e:
-                print(f"   ⚠ Using default info due to: {str(e)}")
-                info = {
-                    'sector': 'Unknown',
-                    'industry': 'Unknown',
-                    'longName': ticker,
-                    'currency': 'USD',
-                    'marketCap': 0,
-                    'trailingPE': None,
-                    'beta': 1.0
+                if attempt > 0:
+                    print(f"   🔄 Retry attempt {attempt + 1}/{max_retries} for {ticker}")
+                    time.sleep(retry_delay * attempt)
+                
+                print(f"📊 Fetching data for {ticker}... (attempt {attempt + 1})")
+                
+                # Create ticker with download directly
+                try:
+                    # Use download method which is more reliable
+                    hist = yf.download(
+                        ticker, 
+                        period=period, 
+                        progress=False,
+                        show_errors=False,
+                        timeout=20
+                    )
+                    
+                    if hist is None or len(hist) == 0:
+                        # Try with shorter periods
+                        for p in ["1y", "6mo", "3mo", "1mo", "5d"]:
+                            print(f"   Trying shorter period: {p}")
+                            hist = yf.download(
+                                ticker, 
+                                period=p, 
+                                progress=False,
+                                show_errors=False,
+                                timeout=20
+                            )
+                            if hist is not None and len(hist) > 0:
+                                print(f"   ✓ Success with period {p}: {len(hist)} data points")
+                                break
+                    else:
+                        print(f"   ✓ Downloaded {len(hist)} data points")
+                    
+                except Exception as download_error:
+                    print(f"   ✗ Download method failed: {str(download_error)}")
+                    # Fallback to Ticker method
+                    stock = yf.Ticker(ticker)
+                    hist = stock.history(period=period)
+                    
+                    if len(hist) == 0:
+                        for p in ["1y", "6mo", "3mo", "1mo", "5d"]:
+                            hist = stock.history(period=p)
+                            if len(hist) > 0:
+                                break
+                
+                if hist is None or len(hist) == 0:
+                    if attempt < max_retries - 1:
+                        continue  # Try again
+                    print(f"❌ No data available for {ticker} after {max_retries} attempts")
+                    return {'success': False, 'error': f'No data available for {ticker}. Please check ticker symbol.'}
+                
+                # Get current price
+                current_price = float(hist['Close'].iloc[-1])
+                print(f"   ✓ Current price: ${current_price:.2f}")
+                
+                # Get stock info with fallback
+                try:
+                    stock = yf.Ticker(ticker)
+                    info = stock.info
+                    
+                    # Validate info
+                    if not info or 'symbol' not in info:
+                        raise Exception("Invalid info")
+                        
+                    print(f"   ✓ Retrieved stock info")
+                    
+                except Exception as info_error:
+                    print(f"   ⚠ Using minimal info: {str(info_error)}")
+                    # Create minimal info from historical data
+                    info = {
+                        'symbol': ticker,
+                        'longName': ticker,
+                        'sector': 'Unknown',
+                        'industry': 'Unknown',
+                        'currency': 'USD',
+                        'marketCap': 0,
+                        'trailingPE': None,
+                        'beta': 1.0
+                    }
+                
+                return {
+                    'success': True,
+                    'data': hist,
+                    'info': info,
+                    'current_price': current_price,
+                    'sector': info.get('sector', 'Unknown'),
+                    'industry': info.get('industry', 'Unknown'),
+                    'market_cap': info.get('marketCap', 0),
+                    'pe_ratio': info.get('trailingPE'),
+                    'beta': info.get('beta', 1.0)
                 }
-            
-            current_price = float(hist['Close'].iloc[-1])
-            print(f"   ✓ Current price: ${current_price:.2f}")
-            
-            return {
-                'success': True,
-                'data': hist,
-                'info': info,
-                'current_price': current_price,
-                'sector': info.get('sector', 'Unknown'),
-                'industry': info.get('industry', 'Unknown'),
-                'market_cap': info.get('marketCap', 0),
-                'pe_ratio': info.get('trailingPE'),
-                'beta': info.get('beta', 1.0)
-            }
-            
-        except Exception as e:
-            print(f"❌ Critical error fetching {ticker}: {str(e)}")
-            return {'success': False, 'error': f'Failed to fetch data: {str(e)}'}
+                
+            except Exception as e:
+                error_msg = str(e)
+                print(f"❌ Error on attempt {attempt + 1}: {error_msg}")
+                
+                if attempt < max_retries - 1:
+                    continue  # Try again
+                
+                return {'success': False, 'error': f'Failed to fetch {ticker}: {error_msg}'}
     
     @staticmethod
     def calculate_rsi(prices, period=14):
