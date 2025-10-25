@@ -2,7 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { LineChart, Line, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, BarChart, Bar } from 'recharts';
 import { TrendingUp, TrendingDown, DollarSign, Activity, PieChart as PieIcon, RefreshCw, LogOut, Plus, Trash2, AlertCircle, CheckCircle, Eye, EyeOff } from 'lucide-react';
 
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
+// CHANGE THIS LINE (remove /api at the end)
+const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000';
 
 export default function AIInvestmentAdvisor() {
   const [auth, setAuth] = useState({ isAuthenticated: false, username: null });
