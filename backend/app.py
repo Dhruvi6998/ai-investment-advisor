@@ -18,7 +18,7 @@ import requests
 app = Flask(__name__)
 
 # Finnhub API Configuration
-FINNHUB_API_KEY = os.environ.get('FINNHUB_API_KEY', 'cthub0hr01qhdtec0imgctub0hr01qhdtec0imh0')  # Free tier key
+FINNHUB_API_KEY = os.environ.get('FINNHUB_API_KEY', 'd3uqcohr01qil4ar9v50d3uqcohr01qil4ar9v5g')  # Free tier key
 FINNHUB_BASE_URL = 'https://finnhub.io/api/v1'
 
 # Secret key for sessions
