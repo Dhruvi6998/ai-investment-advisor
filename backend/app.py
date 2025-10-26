@@ -1,7 +1,6 @@
 from flask import Flask, request, jsonify, session, make_response
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
-import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -16,14 +15,11 @@ import re
 import time
 import requests
 
-# Configure requests session for yfinance
-session_requests = requests.Session()
-session_requests.headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-
-# Override yfinance session
-yf.Ticker._session = session_requests
-
 app = Flask(__name__)
+
+# Finnhub API Configuration
+FINNHUB_API_KEY = os.environ.get('FINNHUB_API_KEY', 'cthub0hr01qhdtec0imgctub0hr01qhdtec0imh0')  # Free tier key
+FINNHUB_BASE_URL = 'https://finnhub.io/api/v1'
 
 # Secret key for sessions
 app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key-change-this-in-production')
@@ -238,130 +234,127 @@ class Database:
 
 class AdvancedAIAdvisor:
     @staticmethod
-    def fetch_stock_data(ticker, period="2y"):
-        """Fetch comprehensive stock data with improved error handling"""
-        max_retries = 3
-        retry_delay = 2
+    def finnhub_request(endpoint, params=None):
+        """Make a request to Finnhub API"""
+        if params is None:
+            params = {}
+        params['token'] = FINNHUB_API_KEY
         
-        for attempt in range(max_retries):
-            try:
-                if attempt > 0:
-                    print(f"   🔄 Retry attempt {attempt + 1}/{max_retries} for {ticker}")
-                    time.sleep(retry_delay * attempt)
-                
-                print(f"📊 Fetching data for {ticker}... (attempt {attempt + 1})")
-                
-                # Create ticker with download directly
-                try:
-                    # Use download method which is more reliable
-                    hist = yf.download(
-                        ticker, 
-                        period=period, 
-                        progress=False,
-                        show_errors=False,
-                        timeout=20
-                    )
-                    
-                    if hist is None or len(hist) == 0:
-                        # Try with shorter periods
-                        for p in ["1y", "6mo", "3mo", "1mo", "5d"]:
-                            print(f"   Trying shorter period: {p}")
-                            hist = yf.download(
-                                ticker, 
-                                period=p, 
-                                progress=False,
-                                show_errors=False,
-                                timeout=20
-                            )
-                            if hist is not None and len(hist) > 0:
-                                print(f"   ✓ Success with period {p}: {len(hist)} data points")
-                                break
-                    else:
-                        print(f"   ✓ Downloaded {len(hist)} data points")
-                    
-                except Exception as download_error:
-                    print(f"   ✗ Download method failed: {str(download_error)}")
-                    # Fallback to Ticker method
-                    stock = yf.Ticker(ticker)
-                    hist = stock.history(period=period)
-                    
-                    if len(hist) == 0:
-                        for p in ["1y", "6mo", "3mo", "1mo", "5d"]:
-                            hist = stock.history(period=p)
-                            if len(hist) > 0:
-                                break
-                
-                if hist is None or len(hist) == 0:
-                    if attempt < max_retries - 1:
-                        continue  # Try again
-                    print(f"❌ No data available for {ticker} after {max_retries} attempts")
-                    return {'success': False, 'error': f'No data available for {ticker}. Please check ticker symbol.'}
-                
-                # Get current price
-                current_price = float(hist['Close'].iloc[-1])
-                print(f"   ✓ Current price: ${current_price:.2f}")
-                
-                # Get stock info with fallback
-                try:
-                    stock = yf.Ticker(ticker)
-                    info = stock.info
-                    
-                    # Validate info
-                    if not info or 'symbol' not in info:
-                        raise Exception("Invalid info")
-                        
-                    print(f"   ✓ Retrieved stock info")
-                    
-                except Exception as info_error:
-                    print(f"   ⚠ Using minimal info: {str(info_error)}")
-                    # Create minimal info from historical data
-                    info = {
-                        'symbol': ticker,
-                        'longName': ticker,
-                        'sector': 'Unknown',
-                        'industry': 'Unknown',
-                        'currency': 'USD',
-                        'marketCap': 0,
-                        'trailingPE': None,
-                        'beta': 1.0
-                    }
-                
-                return {
-                    'success': True,
-                    'data': hist,
-                    'info': info,
-                    'current_price': current_price,
-                    'sector': info.get('sector', 'Unknown'),
-                    'industry': info.get('industry', 'Unknown'),
-                    'market_cap': info.get('marketCap', 0),
-                    'pe_ratio': info.get('trailingPE'),
-                    'beta': info.get('beta', 1.0)
+        try:
+            response = requests.get(f"{FINNHUB_BASE_URL}/{endpoint}", params=params, timeout=10)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            print(f"❌ Finnhub API error: {str(e)}")
+            return None
+    
+    @staticmethod
+    def fetch_stock_data(ticker, period="2y"):
+        """Fetch comprehensive stock data using Finnhub API"""
+        try:
+            print(f"📊 Fetching data for {ticker} using Finnhub...")
+            
+            # Get current quote
+            quote = AdvancedAIAdvisor.finnhub_request('quote', {'symbol': ticker})
+            if not quote or quote.get('c', 0) == 0:
+                print(f"   ❌ No quote data for {ticker}")
+                return {'success': False, 'error': f'No data available for {ticker}'}
+            
+            current_price = float(quote['c'])  # Current price
+            print(f"   ✓ Current price: ${current_price:.2f}")
+            
+            # Get company profile
+            profile = AdvancedAIAdvisor.finnhub_request('stock/profile2', {'symbol': ticker})
+            
+            # Get historical candles (daily data)
+            # Calculate timestamps for historical data
+            to_timestamp = int(time.time())
+            
+            # Map period to days
+            period_days = {
+                '5d': 5, '1mo': 30, '3mo': 90, '6mo': 180, 
+                '1y': 365, '2y': 730, '5y': 1825
+            }
+            days = period_days.get(period, 730)
+            from_timestamp = to_timestamp - (days * 24 * 60 * 60)
+            
+            candles = AdvancedAIAdvisor.finnhub_request('stock/candle', {
+                'symbol': ticker,
+                'resolution': 'D',  # Daily
+                'from': from_timestamp,
+                'to': to_timestamp
+            })
+            
+            if not candles or candles.get('s') != 'ok' or not candles.get('c'):
+                print(f"   ⚠ Limited historical data, using quote only")
+                # Create minimal historical data from quote
+                hist_data = {
+                    'Close': [current_price] * 30,
+                    'Open': [quote.get('o', current_price)] * 30,
+                    'High': [quote.get('h', current_price)] * 30,
+                    'Low': [quote.get('l', current_price)] * 30,
+                    'Volume': [0] * 30
                 }
-                
-            except Exception as e:
-                error_msg = str(e)
-                print(f"❌ Error on attempt {attempt + 1}: {error_msg}")
-                
-                if attempt < max_retries - 1:
-                    continue  # Try again
-                
-                return {'success': False, 'error': f'Failed to fetch {ticker}: {error_msg}'}
+            else:
+                hist_data = {
+                    'Close': candles['c'],
+                    'Open': candles['o'],
+                    'High': candles['h'],
+                    'Low': candles['l'],
+                    'Volume': candles['v']
+                }
+            
+            # Create DataFrame
+            hist = pd.DataFrame(hist_data)
+            print(f"   ✓ Retrieved {len(hist)} data points")
+            
+            # Get company info
+            sector = profile.get('finnhubIndustry', 'Unknown') if profile else 'Unknown'
+            industry = profile.get('finnhubIndustry', 'Unknown') if profile else 'Unknown'
+            market_cap = profile.get('marketCapitalization', 0) * 1_000_000 if profile else 0  # Convert to actual value
+            
+            return {
+                'success': True,
+                'data': hist,
+                'info': {
+                    'symbol': ticker,
+                    'longName': profile.get('name', ticker) if profile else ticker,
+                    'sector': sector,
+                    'industry': industry,
+                    'currency': profile.get('currency', 'USD') if profile else 'USD',
+                    'marketCap': market_cap,
+                    'country': profile.get('country', 'US') if profile else 'US',
+                    'exchange': profile.get('exchange', 'Unknown') if profile else 'Unknown'
+                },
+                'current_price': current_price,
+                'sector': sector,
+                'industry': industry,
+                'market_cap': market_cap,
+                'pe_ratio': None,  # Finnhub free tier doesn't include P/E
+                'beta': 1.0  # Default beta
+            }
+            
+        except Exception as e:
+            print(f"❌ Error fetching {ticker}: {str(e)}")
+            return {'success': False, 'error': f'Failed to fetch {ticker}: {str(e)}'}
     
     @staticmethod
     def calculate_rsi(prices, period=14):
         """Calculate Relative Strength Index"""
-        delta = prices.diff()
+        prices_series = pd.Series(prices)
+        delta = prices_series.diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
         rs = gain / loss
         rsi = 100 - (100 / (1 + rs))
-        return rsi.iloc[-1] if len(rsi) > 0 else 50
+        return rsi.iloc[-1] if len(rsi) > 0 and not pd.isna(rsi.iloc[-1]) else 50
     
     @staticmethod
     def calculate_macd(prices):
         """Calculate MACD"""
-        exp1 = prices.ewm(span=12, adjust=False).mean()
-        exp2 = prices.ewm(span=26, adjust=False).mean()
+        prices_series = pd.Series(prices)
+        exp1 = prices_series.ewm(span=12, adjust=False).mean()
+        exp2 = prices_series.ewm(span=26, adjust=False).mean()
         macd = exp1 - exp2
         signal = macd.ewm(span=9, adjust=False).mean()
         histogram = macd - signal
@@ -374,11 +367,12 @@ class AdvancedAIAdvisor:
     @staticmethod
     def calculate_bollinger_bands(prices, period=20):
         """Calculate Bollinger Bands"""
-        sma = prices.rolling(window=period).mean()
-        std = prices.rolling(window=period).std()
+        prices_series = pd.Series(prices)
+        sma = prices_series.rolling(window=period).mean()
+        std = prices_series.rolling(window=period).std()
         upper_band = sma + (std * 2)
         lower_band = sma - (std * 2)
-        current_price = prices.iloc[-1]
+        current_price = prices_series.iloc[-1]
         
         if len(upper_band) > 0 and len(lower_band) > 0:
             band_width = upper_band.iloc[-1] - lower_band.iloc[-1]
@@ -411,12 +405,13 @@ class AdvancedAIAdvisor:
         future_X = np.arange(len(prices), len(prices) + days_ahead).reshape(-1, 1)
         linear_pred = model.predict(future_X)[-1]
         
-        ema_short = hist['Close'].ewm(span=20).mean()
-        ema_long = hist['Close'].ewm(span=50).mean()
+        prices_series = pd.Series(prices)
+        ema_short = prices_series.ewm(span=20).mean()
+        ema_long = prices_series.ewm(span=50).mean()
         ema_trend = ema_short.iloc[-1] - ema_long.iloc[-1]
         ema_pred = prices[-1] + (ema_trend * (days_ahead / 30))
         
-        returns = hist['Close'].pct_change().dropna()
+        returns = prices_series.pct_change().dropna()
         avg_return = returns.mean()
         volatility = returns.std()
         historical_pred = prices[-1] * (1 + avg_return * days_ahead)
@@ -498,25 +493,29 @@ class AdvancedAIAdvisor:
         profit_loss = total_value - total_cost
         profit_loss_pct = ((current_price - purchase_price) / purchase_price) * 100
         
-        sma_20 = hist['Close'].rolling(window=20).mean().iloc[-1] if len(hist) >= 20 else current_price
-        sma_50 = hist['Close'].rolling(window=50).mean().iloc[-1] if len(hist) >= 50 else current_price
-        sma_200 = hist['Close'].rolling(window=200).mean().iloc[-1] if len(hist) >= 200 else current_price
+        prices = hist['Close'].values if isinstance(hist['Close'], pd.Series) else hist['Close']
+        prices_series = pd.Series(prices)
         
-        rsi = AdvancedAIAdvisor.calculate_rsi(hist['Close'])
-        macd = AdvancedAIAdvisor.calculate_macd(hist['Close'])
-        bollinger = AdvancedAIAdvisor.calculate_bollinger_bands(hist['Close'])
+        sma_20 = prices_series.rolling(window=20).mean().iloc[-1] if len(prices) >= 20 else current_price
+        sma_50 = prices_series.rolling(window=50).mean().iloc[-1] if len(prices) >= 50 else current_price
+        sma_200 = prices_series.rolling(window=200).mean().iloc[-1] if len(prices) >= 200 else current_price
         
-        returns = hist['Close'].pct_change().dropna()
+        rsi = AdvancedAIAdvisor.calculate_rsi(prices)
+        macd = AdvancedAIAdvisor.calculate_macd(prices)
+        bollinger = AdvancedAIAdvisor.calculate_bollinger_bands(prices)
+        
+        returns = prices_series.pct_change().dropna()
         volatility = returns.std() * np.sqrt(252)
         sharpe_ratio = (returns.mean() * 252) / (returns.std() * np.sqrt(252)) if returns.std() > 0 else 0
         
-        returns_7d = ((hist['Close'].iloc[-1] - hist['Close'].iloc[-7]) / hist['Close'].iloc[-7] * 100) if len(hist) >= 7 else 0
-        returns_30d = ((hist['Close'].iloc[-1] - hist['Close'].iloc[-30]) / hist['Close'].iloc[-30] * 100) if len(hist) >= 30 else 0
-        returns_90d = ((hist['Close'].iloc[-1] - hist['Close'].iloc[-90]) / hist['Close'].iloc[-90] * 100) if len(hist) >= 90 else 0
-        returns_1y = ((hist['Close'].iloc[-1] - hist['Close'].iloc[-252]) / hist['Close'].iloc[-252] * 100) if len(hist) >= 252 else 0
+        returns_7d = ((prices[-1] - prices[-7]) / prices[-7] * 100) if len(prices) >= 7 else 0
+        returns_30d = ((prices[-1] - prices[-30]) / prices[-30] * 100) if len(prices) >= 30 else 0
+        returns_90d = ((prices[-1] - prices[-90]) / prices[-90] * 100) if len(prices) >= 90 else 0
+        returns_1y = ((prices[-1] - prices[-252]) / prices[-252] * 100) if len(prices) >= 252 else 0
         
-        avg_volume = hist['Volume'].mean()
-        recent_volume = hist['Volume'].tail(5).mean()
+        volumes = hist['Volume'].values if isinstance(hist['Volume'], pd.Series) else hist['Volume']
+        avg_volume = np.mean(volumes)
+        recent_volume = np.mean(volumes[-5:]) if len(volumes) >= 5 else avg_volume
         volume_trend = 'Increasing' if recent_volume > avg_volume * 1.2 else 'Decreasing' if recent_volume < avg_volume * 0.8 else 'Normal'
         
         prediction = AdvancedAIAdvisor.predict_future_price(hist, days_ahead=30)
@@ -550,7 +549,7 @@ class AdvancedAIAdvisor:
             'sector': stock_data['sector'],
             'industry': stock_data['industry'],
             'market_cap': stock_data.get('market_cap', 0),
-            'pe_ratio': round(stock_data.get('pe_ratio', 0), 2) if stock_data.get('pe_ratio') else None,
+            'pe_ratio': None,
             'prediction': prediction
         }
         
@@ -887,7 +886,7 @@ def add_stock():
     purchase_price = float(data.get('purchase_price'))
     notes = data.get('notes', '')
     
-    stock_data = AdvancedAIAdvisor.fetch_stock_data(ticker, period="1d")
+    stock_data = AdvancedAIAdvisor.fetch_stock_data(ticker, period="5d")
     if not stock_data['success']:
         return jsonify({'success': False, 'message': 'Invalid ticker symbol'}), 400
     
@@ -1051,7 +1050,7 @@ def search_stock():
     if not ticker:
         return jsonify({'success': False, 'message': 'Ticker required'}), 400
     
-    stock_data = AdvancedAIAdvisor.fetch_stock_data(ticker, period="1mo")
+    stock_data = AdvancedAIAdvisor.fetch_stock_data(ticker, period="5d")
     if not stock_data['success']:
         return jsonify({'success': False, 'message': 'Stock not found'}), 404
     
@@ -1097,13 +1096,14 @@ def get_db_info():
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    return jsonify({'status': 'healthy', 'message': 'AI Investment Advisor API is running'}), 200
+    return jsonify({'status': 'healthy', 'message': 'AI Investment Advisor API with Finnhub'}), 200
 
 @app.route('/', methods=['GET'])
 def root():
     return jsonify({
         'message': 'AI Investment Advisor API',
-        'version': '1.0',
+        'version': '2.0 - Finnhub Edition',
+        'data_provider': 'Finnhub',
         'endpoints': {
             'auth': ['/register', '/login', '/logout', '/check-auth'],
             'portfolio': ['/portfolio', '/portfolio/add', '/portfolio/remove', '/portfolio/update'],
@@ -1116,32 +1116,31 @@ if __name__ == '__main__':
     print("🔧 Initializing database...")
     init_database()
     
-    print("\n🚀 Advanced AI Investment Advisor Backend Starting...")
+    print("\n🚀 AI Investment Advisor with Finnhub Starting...")
     
     port = int(os.environ.get('PORT', 5000))
     debug = os.environ.get('FLASK_ENV') != 'production'
     
     print(f"📊 Server running on port {port}")
+    print(f"📡 Data Provider: Finnhub API")
+    print(f"🔑 API Key: {'*' * 20}{FINNHUB_API_KEY[-10:]}")
     print("\n💾 DATABASE FEATURES:")
     print("   ✓ SQLite database for persistent storage")
     print("   ✓ User authentication & registration")
     print("   ✓ Portfolio data saved to database")
     print("   ✓ Analysis history tracking")
-    print("   ✓ Data persists across server restarts")
-    print(f"   ✓ Database file: {DATABASE}")
     print("\n🤖 AI FEATURES:")
     print("   ✓ Future price predictions (30 days)")
     print("   ✓ Advanced technical indicators (RSI, MACD, Bollinger Bands)")
     print("   ✓ Risk scoring & analysis")
     print("   ✓ Volume trend analysis")
     print("   ✓ Machine learning predictions")
-    print("   ✓ Comprehensive AI recommendations")
-    print("\n🌍 MARKET SUPPORT:")
-    print("   ✓ US stocks (AAPL, MSFT, GOOGL...)")
-    print("   ✓ India NSE (RELIANCE.NS, TCS.NS...)")
-    print("   ✓ India BSE (RELIANCE.BO, TCS.BO...)")
-    print("   ✓ UK, Japan, Hong Kong, and more!")
-    print("\n✅ Ready to analyze your portfolio with advanced AI!")
+    print("\n🌍 GLOBAL MARKET SUPPORT via Finnhub:")
+    print("   ✓ US Stocks: AAPL, MSFT, GOOGL, TSLA")
+    print("   ✓ India NSE: RELIANCE.NS, TCS.NS, INFY.NS")
+    print("   ✓ India BSE: RELIANCE.BO, TCS.BO, INFY.BO")
+    print("   ✓ UK, Europe, Asia, and more!")
+    print("\n✅ Ready to analyze your portfolio!")
     print("=" * 60)
     
     app.run(host='0.0.0.0', port=port, debug=debug)
