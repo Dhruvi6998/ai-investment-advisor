@@ -1,19 +1,25 @@
-from flask import Flask, request, jsonify, session
+from flask import Flask, request, jsonify, session, make_response
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
-import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+import json
 import os
 from collections import defaultdict
+from scipy import stats
 from sklearn.linear_model import LinearRegression
 import sqlite3
 from contextlib import contextmanager
 import re
 import time
+import requests
 
 app = Flask(__name__)
+
+# Finnhub API Configuration
+FINNHUB_API_KEY = os.environ.get('FINNHUB_API_KEY', 'd3uqcohr01qil4ar9v50d3uqcohr01qil4ar9v5g')  # Free tier key
+FINNHUB_BASE_URL = 'https://finnhub.io/api/v1'
 
 # Secret key for sessions
 app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key-change-this-in-production')
@@ -28,6 +34,7 @@ app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 CORS(app, supports_credentials=True)
 
 def is_allowed_origin(origin):
+    """Allow localhost or *.vercel.app"""
     if not origin:
         return False
     if origin.startswith('http://localhost:'):
@@ -40,6 +47,7 @@ def is_allowed_origin(origin):
 
 @app.after_request
 def after_request(response):
+    """Manually allow only verified origins"""
     origin = request.headers.get('Origin')
     if origin and is_allowed_origin(origin):
         response.headers['Access-Control-Allow-Origin'] = origin
@@ -48,10 +56,12 @@ def after_request(response):
         response.headers['Access-Control-Allow-Methods'] = 'GET,POST,PUT,DELETE,OPTIONS'
     return response
 
+# Database Configuration
 DATABASE = 'investment_advisor.db'
 
 @contextmanager
 def get_db():
+    """Context manager for database connections"""
     conn = sqlite3.connect(DATABASE)
     conn.row_factory = sqlite3.Row
     try:
@@ -64,6 +74,7 @@ def get_db():
         conn.close()
 
 def init_database():
+    """Initialize database tables"""
     with get_db() as conn:
         cursor = conn.cursor()
         
@@ -121,44 +132,59 @@ class Database:
         with get_db() as conn:
             cursor = conn.cursor()
             password_hash = generate_password_hash(password)
-            cursor.execute('INSERT INTO users (username, password, email) VALUES (?, ?, ?)',
-                (username, password_hash, email))
+            cursor.execute(
+                'INSERT INTO users (username, password, email) VALUES (?, ?, ?)',
+                (username, password_hash, email)
+            )
             return cursor.lastrowid
     
     @staticmethod
     def update_last_login(user_id):
         with get_db() as conn:
             cursor = conn.cursor()
-            cursor.execute('UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?', (user_id,))
+            cursor.execute(
+                'UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?',
+                (user_id,)
+            )
     
     @staticmethod
     def get_portfolio(user_id):
         with get_db() as conn:
             cursor = conn.cursor()
-            cursor.execute('SELECT * FROM portfolio WHERE user_id = ? ORDER BY purchase_date DESC', (user_id,))
-            return [dict(row) for row in cursor.fetchall()]
+            cursor.execute(
+                'SELECT * FROM portfolio WHERE user_id = ? ORDER BY purchase_date DESC',
+                (user_id,)
+            )
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
     
     @staticmethod
     def add_stock(user_id, ticker, quantity, purchase_price, notes=None):
         with get_db() as conn:
             cursor = conn.cursor()
             try:
-                cursor.execute('INSERT INTO portfolio (user_id, ticker, quantity, purchase_price, notes) VALUES (?, ?, ?, ?, ?)',
-                    (user_id, ticker, quantity, purchase_price, notes))
+                cursor.execute('''
+                    INSERT INTO portfolio (user_id, ticker, quantity, purchase_price, notes)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (user_id, ticker, quantity, purchase_price, notes))
                 return cursor.lastrowid
             except sqlite3.IntegrityError:
-                cursor.execute('''UPDATE portfolio 
+                cursor.execute('''
+                    UPDATE portfolio 
                     SET quantity = quantity + ?, 
                         purchase_price = (purchase_price * quantity + ? * ?) / (quantity + ?)
-                    WHERE user_id = ? AND ticker = ?''',
-                    (quantity, purchase_price, quantity, quantity, user_id, ticker))
+                    WHERE user_id = ? AND ticker = ?
+                ''', (quantity, purchase_price, quantity, quantity, user_id, ticker))
                 return None
     
     @staticmethod
     def remove_stock(user_id, ticker):
         with get_db() as conn:
             cursor = conn.cursor()
-            cursor.execute('DELETE FROM portfolio WHERE user_id = ? AND ticker = ?', (user_id, ticker))
+            cursor.execute(
+                'DELETE FROM portfolio WHERE user_id = ? AND ticker = ?',
+                (user_id, ticker)
+            )
             return cursor.rowcount > 0
     
     @staticmethod
@@ -166,134 +192,156 @@ class Database:
         with get_db() as conn:
             cursor = conn.cursor()
             if quantity is not None and purchase_price is not None:
-                cursor.execute('UPDATE portfolio SET quantity = ?, purchase_price = ? WHERE user_id = ? AND ticker = ?',
-                    (quantity, purchase_price, user_id, ticker))
+                cursor.execute('''
+                    UPDATE portfolio 
+                    SET quantity = ?, purchase_price = ?
+                    WHERE user_id = ? AND ticker = ?
+                ''', (quantity, purchase_price, user_id, ticker))
             elif quantity is not None:
-                cursor.execute('UPDATE portfolio SET quantity = ? WHERE user_id = ? AND ticker = ?',
-                    (quantity, user_id, ticker))
+                cursor.execute('''
+                    UPDATE portfolio SET quantity = ? WHERE user_id = ? AND ticker = ?
+                ''', (quantity, user_id, ticker))
             return cursor.rowcount > 0
     
     @staticmethod
     def save_analysis(user_id, ticker, current_price, predicted_price, recommendation, confidence):
         with get_db() as conn:
             cursor = conn.cursor()
-            cursor.execute('''INSERT INTO analysis_history 
+            cursor.execute('''
+                INSERT INTO analysis_history 
                 (user_id, ticker, current_price, predicted_price, recommendation, confidence)
-                VALUES (?, ?, ?, ?, ?, ?)''',
-                (user_id, ticker, current_price, predicted_price, recommendation, confidence))
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (user_id, ticker, current_price, predicted_price, recommendation, confidence))
     
     @staticmethod
     def get_analysis_history(user_id, ticker=None, limit=10):
         with get_db() as conn:
             cursor = conn.cursor()
             if ticker:
-                cursor.execute('SELECT * FROM analysis_history WHERE user_id = ? AND ticker = ? ORDER BY analysis_date DESC LIMIT ?',
-                    (user_id, ticker, limit))
+                cursor.execute('''
+                    SELECT * FROM analysis_history 
+                    WHERE user_id = ? AND ticker = ?
+                    ORDER BY analysis_date DESC LIMIT ?
+                ''', (user_id, ticker, limit))
             else:
-                cursor.execute('SELECT * FROM analysis_history WHERE user_id = ? ORDER BY analysis_date DESC LIMIT ?',
-                    (user_id, limit))
-            return [dict(row) for row in cursor.fetchall()]
+                cursor.execute('''
+                    SELECT * FROM analysis_history 
+                    WHERE user_id = ?
+                    ORDER BY analysis_date DESC LIMIT ?
+                ''', (user_id, limit))
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
 
 class AdvancedAIAdvisor:
     @staticmethod
-    def fetch_stock_data(ticker, period="2y"):
-        """Fetch stock data with aggressive retry and multiple methods"""
+    def finnhub_request(endpoint, params=None):
+        """Make a request to Finnhub API"""
+        if params is None:
+            params = {}
+        params['token'] = FINNHUB_API_KEY
+        
         try:
-            print(f"📊 Fetching {ticker}...")
+            response = requests.get(f"{FINNHUB_BASE_URL}/{endpoint}", params=params, timeout=10)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            print(f"❌ Finnhub API error: {str(e)}")
+            return None
+    
+    @staticmethod
+    def fetch_stock_data(ticker, period="2y"):
+        """Fetch comprehensive stock data using Finnhub API"""
+        try:
+            print(f"📊 Fetching data for {ticker} using Finnhub...")
             
-            # Method 1: Direct download (most reliable)
-            try:
-                time.sleep(0.3)  # Rate limiting
-                df = yf.download(ticker, period=period, progress=False, timeout=30)
-                
-                if df is not None and not df.empty and len(df) > 0:
-                    print(f"   ✓ Method 1 success: {len(df)} points")
-                    current_price = float(df['Close'].iloc[-1])
-                    
-                    # Get info separately
-                    try:
-                        stock = yf.Ticker(ticker)
-                        info = stock.info or {}
-                    except:
-                        info = {}
-                    
-                    return {
-                        'success': True,
-                        'data': df,
-                        'info': info,
-                        'current_price': current_price,
-                        'sector': info.get('sector', 'Unknown'),
-                        'industry': info.get('industry', 'Unknown'),
-                        'market_cap': info.get('marketCap', 0),
-                        'pe_ratio': info.get('trailingPE'),
-                        'beta': info.get('beta', 1.0)
-                    }
-            except Exception as e1:
-                print(f"   ✗ Method 1 failed: {str(e1)[:50]}")
+            # Get current quote
+            quote = AdvancedAIAdvisor.finnhub_request('quote', {'symbol': ticker})
+            if not quote or quote.get('c', 0) == 0:
+                print(f"   ❌ No quote data for {ticker}")
+                return {'success': False, 'error': f'No data available for {ticker}'}
             
-            # Method 2: Ticker object with history
-            try:
-                time.sleep(0.3)
-                stock = yf.Ticker(ticker)
-                df = stock.history(period=period)
-                
-                if df is not None and not df.empty and len(df) > 0:
-                    print(f"   ✓ Method 2 success: {len(df)} points")
-                    current_price = float(df['Close'].iloc[-1])
-                    
-                    try:
-                        info = stock.info or {}
-                    except:
-                        info = {}
-                    
-                    return {
-                        'success': True,
-                        'data': df,
-                        'info': info,
-                        'current_price': current_price,
-                        'sector': info.get('sector', 'Unknown'),
-                        'industry': info.get('industry', 'Unknown'),
-                        'market_cap': info.get('marketCap', 0),
-                        'pe_ratio': info.get('trailingPE'),
-                        'beta': info.get('beta', 1.0)
-                    }
-            except Exception as e2:
-                print(f"   ✗ Method 2 failed: {str(e2)[:50]}")
+            current_price = float(quote['c'])  # Current price
+            print(f"   ✓ Current price: ${current_price:.2f}")
             
-            # Method 3: Try shorter periods
-            for p in ["1y", "6mo", "3mo", "1mo", "5d"]:
-                try:
-                    time.sleep(0.3)
-                    df = yf.download(ticker, period=p, progress=False, timeout=20)
-                    
-                    if df is not None and not df.empty and len(df) > 0:
-                        print(f"   ✓ Method 3 ({p}) success: {len(df)} points")
-                        current_price = float(df['Close'].iloc[-1])
-                        
-                        return {
-                            'success': True,
-                            'data': df,
-                            'info': {},
-                            'current_price': current_price,
-                            'sector': 'Unknown',
-                            'industry': 'Unknown',
-                            'market_cap': 0,
-                            'pe_ratio': None,
-                            'beta': 1.0
-                        }
-                except:
-                    continue
+            # Get company profile
+            profile = AdvancedAIAdvisor.finnhub_request('stock/profile2', {'symbol': ticker})
             
-            print(f"   ❌ All methods failed for {ticker}")
-            return {'success': False, 'error': f'Unable to fetch data for {ticker}'}
+            # Get historical candles (daily data)
+            # Calculate timestamps for historical data
+            to_timestamp = int(time.time())
+            
+            # Map period to days
+            period_days = {
+                '5d': 5, '1mo': 30, '3mo': 90, '6mo': 180, 
+                '1y': 365, '2y': 730, '5y': 1825
+            }
+            days = period_days.get(period, 730)
+            from_timestamp = to_timestamp - (days * 24 * 60 * 60)
+            
+            candles = AdvancedAIAdvisor.finnhub_request('stock/candle', {
+                'symbol': ticker,
+                'resolution': 'D',  # Daily
+                'from': from_timestamp,
+                'to': to_timestamp
+            })
+            
+            if not candles or candles.get('s') != 'ok' or not candles.get('c'):
+                print(f"   ⚠ Limited historical data, using quote only")
+                # Create minimal historical data from quote
+                hist_data = {
+                    'Close': [current_price] * 30,
+                    'Open': [quote.get('o', current_price)] * 30,
+                    'High': [quote.get('h', current_price)] * 30,
+                    'Low': [quote.get('l', current_price)] * 30,
+                    'Volume': [0] * 30
+                }
+            else:
+                hist_data = {
+                    'Close': candles['c'],
+                    'Open': candles['o'],
+                    'High': candles['h'],
+                    'Low': candles['l'],
+                    'Volume': candles['v']
+                }
+            
+            # Create DataFrame
+            hist = pd.DataFrame(hist_data)
+            print(f"   ✓ Retrieved {len(hist)} data points")
+            
+            # Get company info
+            sector = profile.get('finnhubIndustry', 'Unknown') if profile else 'Unknown'
+            industry = profile.get('finnhubIndustry', 'Unknown') if profile else 'Unknown'
+            market_cap = profile.get('marketCapitalization', 0) * 1_000_000 if profile else 0  # Convert to actual value
+            
+            return {
+                'success': True,
+                'data': hist,
+                'info': {
+                    'symbol': ticker,
+                    'longName': profile.get('name', ticker) if profile else ticker,
+                    'sector': sector,
+                    'industry': industry,
+                    'currency': profile.get('currency', 'USD') if profile else 'USD',
+                    'marketCap': market_cap,
+                    'country': profile.get('country', 'US') if profile else 'US',
+                    'exchange': profile.get('exchange', 'Unknown') if profile else 'Unknown'
+                },
+                'current_price': current_price,
+                'sector': sector,
+                'industry': industry,
+                'market_cap': market_cap,
+                'pe_ratio': None,  # Finnhub free tier doesn't include P/E
+                'beta': 1.0  # Default beta
+            }
             
         except Exception as e:
-            print(f"❌ Fatal error: {str(e)}")
-            return {'success': False, 'error': str(e)}
+            print(f"❌ Error fetching {ticker}: {str(e)}")
+            return {'success': False, 'error': f'Failed to fetch {ticker}: {str(e)}'}
     
     @staticmethod
     def calculate_rsi(prices, period=14):
-        prices_series = pd.Series(prices) if not isinstance(prices, pd.Series) else prices
+        """Calculate Relative Strength Index"""
+        prices_series = pd.Series(prices)
         delta = prices_series.diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
@@ -303,7 +351,8 @@ class AdvancedAIAdvisor:
     
     @staticmethod
     def calculate_macd(prices):
-        prices_series = pd.Series(prices) if not isinstance(prices, pd.Series) else prices
+        """Calculate MACD"""
+        prices_series = pd.Series(prices)
         exp1 = prices_series.ewm(span=12, adjust=False).mean()
         exp2 = prices_series.ewm(span=26, adjust=False).mean()
         macd = exp1 - exp2
@@ -317,7 +366,8 @@ class AdvancedAIAdvisor:
     
     @staticmethod
     def calculate_bollinger_bands(prices, period=20):
-        prices_series = pd.Series(prices) if not isinstance(prices, pd.Series) else prices
+        """Calculate Bollinger Bands"""
+        prices_series = pd.Series(prices)
         sma = prices_series.rolling(window=period).mean()
         std = prices_series.rolling(window=period).std()
         upper_band = sma + (std * 2)
@@ -326,7 +376,10 @@ class AdvancedAIAdvisor:
         
         if len(upper_band) > 0 and len(lower_band) > 0:
             band_width = upper_band.iloc[-1] - lower_band.iloc[-1]
-            position = ((current_price - lower_band.iloc[-1]) / band_width * 100) if band_width > 0 else 50
+            if band_width > 0:
+                position = ((current_price - lower_band.iloc[-1]) / band_width) * 100
+            else:
+                position = 50
         else:
             position = 50
             
@@ -338,10 +391,12 @@ class AdvancedAIAdvisor:
     
     @staticmethod
     def predict_future_price(hist, days_ahead=30):
+        """Predict future price using ML"""
         if len(hist) < 60:
             return None
         
         prices = hist['Close'].values
+        
         X = np.arange(len(prices)).reshape(-1, 1)
         y = prices
         model = LinearRegression()
@@ -375,6 +430,7 @@ class AdvancedAIAdvisor:
     
     @staticmethod
     def calculate_risk_score(stock_data, metrics):
+        """Calculate risk score"""
         risk_factors = []
         
         volatility = metrics.get('volatility', 0)
@@ -425,6 +481,7 @@ class AdvancedAIAdvisor:
     
     @staticmethod
     def calculate_comprehensive_metrics(ticker, quantity, purchase_price):
+        """Calculate all metrics"""
         stock_data = AdvancedAIAdvisor.fetch_stock_data(ticker)
         if not stock_data['success']:
             return None
@@ -492,7 +549,7 @@ class AdvancedAIAdvisor:
             'sector': stock_data['sector'],
             'industry': stock_data['industry'],
             'market_cap': stock_data.get('market_cap', 0),
-            'pe_ratio': stock_data.get('pe_ratio'),
+            'pe_ratio': None,
             'prediction': prediction
         }
         
@@ -502,6 +559,7 @@ class AdvancedAIAdvisor:
     
     @staticmethod
     def generate_ai_recommendation(metrics):
+        """Generate AI recommendation"""
         score = 0
         reasons = []
         signals = {'bullish': 0, 'bearish': 0}
@@ -628,6 +686,7 @@ class AdvancedAIAdvisor:
     
     @staticmethod
     def analyze_portfolio_comprehensive(holdings):
+        """Comprehensive portfolio analysis"""
         if not holdings:
             return {
                 'analysis': [],
@@ -643,7 +702,10 @@ class AdvancedAIAdvisor:
         
         for holding in holdings:
             metrics = AdvancedAIAdvisor.calculate_comprehensive_metrics(
-                holding['ticker'], holding['quantity'], holding['purchase_price'])
+                holding['ticker'],
+                holding['quantity'],
+                holding['purchase_price']
+            )
             if metrics:
                 metrics['weight'] = 0
                 recommendation = AdvancedAIAdvisor.generate_ai_recommendation(metrics)
@@ -679,7 +741,8 @@ class AdvancedAIAdvisor:
             health = "Needs Attention"
         
         suggested_actions = AdvancedAIAdvisor.generate_portfolio_actions(
-            analysis, sector_weights, total_value, diversification_score)
+            analysis, sector_weights, total_value, diversification_score
+        )
         
         return {
             'analysis': analysis,
@@ -697,6 +760,7 @@ class AdvancedAIAdvisor:
     
     @staticmethod
     def generate_portfolio_actions(analysis, sector_weights, total_value, div_score):
+        """Generate portfolio actions"""
         actions = []
         
         max_sector = max(sector_weights.items(), key=lambda x: x[1]) if sector_weights else (None, 0)
@@ -737,7 +801,7 @@ class AdvancedAIAdvisor:
         
         return sorted(actions, key=lambda x: {'High': 0, 'Medium': 1, 'Low': 2}[x['priority']])
 
-# Routes
+# Auth routes
 @app.route('/register', methods=['POST'])
 def register():
     data = request.json
@@ -752,6 +816,7 @@ def register():
         return jsonify({'success': False, 'message': 'User already exists'}), 400
     
     user_id = Database.create_user(username, password, email)
+    
     return jsonify({'success': True, 'message': 'Registration successful', 'user_id': user_id})
 
 @app.route('/login', methods=['POST'])
@@ -772,10 +837,16 @@ def login():
         return jsonify({'success': False, 'message': 'Invalid password'}), 401
     
     Database.update_last_login(user['id'])
+    
     session['user_id'] = user['id']
     session['username'] = username
     
-    return jsonify({'success': True, 'message': 'Login successful', 'username': username, 'user_id': user['id']})
+    return jsonify({
+        'success': True, 
+        'message': 'Login successful', 
+        'username': username,
+        'user_id': user['id']
+    })
 
 @app.route('/logout', methods=['POST'])
 def logout():
@@ -787,8 +858,13 @@ def logout():
 def check_auth():
     user_id = session.get('user_id')
     username = session.get('username')
-    return jsonify({'authenticated': user_id is not None, 'username': username, 'user_id': user_id})
+    return jsonify({
+        'authenticated': user_id is not None,
+        'username': username,
+        'user_id': user_id
+    })
 
+# Portfolio routes
 @app.route('/portfolio', methods=['GET'])
 def get_portfolio():
     user_id = session.get('user_id')
@@ -816,7 +892,11 @@ def add_stock():
     
     stock_id = Database.add_stock(user_id, ticker, quantity, purchase_price, notes)
     
-    return jsonify({'success': True, 'message': 'Stock added to portfolio', 'stock_id': stock_id})
+    return jsonify({
+        'success': True, 
+        'message': 'Stock added to portfolio',
+        'stock_id': stock_id
+    })
 
 @app.route('/portfolio/remove', methods=['POST'])
 def remove_stock():
@@ -826,6 +906,7 @@ def remove_stock():
     
     data = request.json
     ticker = data.get('ticker', '').upper()
+    
     success = Database.remove_stock(user_id, ticker)
     
     if success:
@@ -843,6 +924,7 @@ def update_stock():
     ticker = data.get('ticker', '').upper()
     quantity = data.get('quantity')
     purchase_price = data.get('purchase_price')
+    
     success = Database.update_stock(user_id, ticker, quantity, purchase_price)
     
     if success:
@@ -850,6 +932,7 @@ def update_stock():
     else:
         return jsonify({'success': False, 'message': 'Stock not found'}), 404
 
+# AI Analysis routes
 @app.route('/analyze', methods=['GET'])
 def analyze_portfolio():
     user_id = session.get('user_id')
@@ -857,13 +940,19 @@ def analyze_portfolio():
         return jsonify({'success': False, 'message': 'Not authenticated'}), 401
     
     portfolio = Database.get_portfolio(user_id)
+    
     analysis = AdvancedAIAdvisor.analyze_portfolio_comprehensive(portfolio)
     
     for stock in analysis.get('analysis', []):
         if stock.get('prediction'):
-            Database.save_analysis(user_id, stock['ticker'], stock['current_price'],
-                stock['prediction']['predicted_price'], stock['recommendation']['action'],
-                stock['recommendation']['confidence'])
+            Database.save_analysis(
+                user_id,
+                stock['ticker'],
+                stock['current_price'],
+                stock['prediction']['predicted_price'],
+                stock['recommendation']['action'],
+                stock['recommendation']['confidence']
+            )
     
     return jsonify({'success': True, 'analysis': analysis})
 
@@ -875,12 +964,14 @@ def get_analysis_history():
     
     ticker = request.args.get('ticker')
     limit = int(request.args.get('limit', 10))
+    
     history = Database.get_analysis_history(user_id, ticker, limit)
     
     return jsonify({'success': True, 'history': history})
 
 @app.route('/rebalance', methods=['GET'])
 def get_rebalancing():
+    """Portfolio rebalancing recommendations"""
     user_id = session.get('user_id')
     if not user_id:
         return jsonify({'success': False, 'message': 'Not authenticated'}), 401
@@ -888,17 +979,23 @@ def get_rebalancing():
     portfolio = Database.get_portfolio(user_id)
     
     if not portfolio or len(portfolio) < 2:
-        return jsonify({'success': True, 'rebalancing': {
-            'rebalancing_needed': False,
-            'message': 'Need at least 2 stocks to analyze rebalancing'
-        }})
+        return jsonify({
+            'success': True,
+            'rebalancing': {
+                'rebalancing_needed': False,
+                'message': 'Need at least 2 stocks to analyze rebalancing'
+            }
+        })
     
     analysis = []
     total_value = 0
     
     for holding in portfolio:
         metrics = AdvancedAIAdvisor.calculate_comprehensive_metrics(
-            holding['ticker'], holding['quantity'], holding['purchase_price'])
+            holding['ticker'],
+            holding['quantity'],
+            holding['purchase_price']
+        )
         if metrics:
             analysis.append(metrics)
             total_value += metrics['total_value']
@@ -921,7 +1018,6 @@ def get_rebalancing():
                 action = f"Reduce {stock['ticker']} by {abs(diff):.1f}% (sell ~{abs(int(shares_diff))} shares ≈ ${abs(dollar_diff):.0f})"
             else:
                 action = f"Increase {stock['ticker']} by {abs(diff):.1f}% (buy ~{abs(int(shares_diff))} shares ≈ ${abs(dollar_diff):.0f})"
-            
             rebalancing_actions.append({
                 'ticker': stock['ticker'],
                 'action': action,
@@ -932,15 +1028,21 @@ def get_rebalancing():
                 'value_to_trade': round(dollar_diff, 2)
             })
     
-    return jsonify({'success': True, 'rebalancing': {
-        'rebalancing_needed': len(rebalancing_actions) > 0,
-        'actions': rebalancing_actions,
-        'current_allocation': [{'ticker': s['ticker'], 'weight': round(s['current_weight'], 2),
-            'value': round(s['total_value'], 2)} for s in analysis],
-        'target_weight': round(target_weight, 2),
-        'total_portfolio_value': round(total_value, 2),
-        'num_stocks': len(analysis)
-    }})
+    return jsonify({
+        'success': True,
+        'rebalancing': {
+            'rebalancing_needed': len(rebalancing_actions) > 0,
+            'actions': rebalancing_actions,
+            'current_allocation': [{
+                'ticker': s['ticker'],
+                'weight': round(s['current_weight'], 2),
+                'value': round(s['total_value'], 2)
+            } for s in analysis],
+            'target_weight': round(target_weight, 2),
+            'total_portfolio_value': round(total_value, 2),
+            'num_stocks': len(analysis)
+        }
+    })
 
 @app.route('/stock-search', methods=['GET'])
 def search_stock():
@@ -953,43 +1055,55 @@ def search_stock():
         return jsonify({'success': False, 'message': 'Stock not found'}), 404
     
     info = stock_data['info']
-    return jsonify({'success': True, 'stock': {
-        'ticker': ticker,
-        'name': info.get('longName', ticker),
-        'current_price': stock_data['current_price'],
-        'currency': info.get('currency', 'USD'),
-        'sector': info.get('sector', 'N/A'),
-        'industry': info.get('industry', 'N/A')
-    }})
+    return jsonify({
+        'success': True,
+        'stock': {
+            'ticker': ticker,
+            'name': info.get('longName', ticker),
+            'current_price': stock_data['current_price'],
+            'currency': info.get('currency', 'USD'),
+            'sector': info.get('sector', 'N/A'),
+            'industry': info.get('industry', 'N/A')
+        }
+    })
 
 @app.route('/db-info', methods=['GET'])
 def get_db_info():
+    """Get database statistics"""
     user_id = session.get('user_id')
     if not user_id:
         return jsonify({'success': False, 'message': 'Not authenticated'}), 401
     
     with get_db() as conn:
         cursor = conn.cursor()
+        
         cursor.execute('SELECT username, email, created_at, last_login FROM users WHERE id = ?', (user_id,))
         user_info = dict(cursor.fetchone())
+        
         cursor.execute('SELECT COUNT(*) as stock_count FROM portfolio WHERE user_id = ?', (user_id,))
         portfolio_stats = dict(cursor.fetchone())
+        
         cursor.execute('SELECT COUNT(*) as analysis_count FROM analysis_history WHERE user_id = ?', (user_id,))
         analysis_stats = dict(cursor.fetchone())
     
-    return jsonify({'success': True, 'user_info': user_info, 'portfolio_stats': portfolio_stats,
-        'analysis_stats': analysis_stats, 'database_file': DATABASE})
+    return jsonify({
+        'success': True,
+        'user_info': user_info,
+        'portfolio_stats': portfolio_stats,
+        'analysis_stats': analysis_stats,
+        'database_file': DATABASE
+    })
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    return jsonify({'status': 'healthy', 'message': 'AI Investment Advisor API - yfinance'}), 200
+    return jsonify({'status': 'healthy', 'message': 'AI Investment Advisor API with Finnhub'}), 200
 
 @app.route('/', methods=['GET'])
 def root():
     return jsonify({
         'message': 'AI Investment Advisor API',
-        'version': '2.0 - yfinance',
-        'data_provider': 'Yahoo Finance (yfinance)',
+        'version': '2.0 - Finnhub Edition',
+        'data_provider': 'Finnhub',
         'endpoints': {
             'auth': ['/register', '/login', '/logout', '/check-auth'],
             'portfolio': ['/portfolio', '/portfolio/add', '/portfolio/remove', '/portfolio/update'],
@@ -1002,18 +1116,31 @@ if __name__ == '__main__':
     print("🔧 Initializing database...")
     init_database()
     
-    print("\n🚀 AI Investment Advisor Starting...")
+    print("\n🚀 AI Investment Advisor with Finnhub Starting...")
+    
     port = int(os.environ.get('PORT', 5000))
     debug = os.environ.get('FLASK_ENV') != 'production'
     
     print(f"📊 Server running on port {port}")
-    print(f"📡 Data Provider: Yahoo Finance (yfinance)")
-    print("\n🌍 GLOBAL MARKET SUPPORT:")
+    print(f"📡 Data Provider: Finnhub API")
+    print(f"🔑 API Key: {'*' * 20}{FINNHUB_API_KEY[-10:]}")
+    print("\n💾 DATABASE FEATURES:")
+    print("   ✓ SQLite database for persistent storage")
+    print("   ✓ User authentication & registration")
+    print("   ✓ Portfolio data saved to database")
+    print("   ✓ Analysis history tracking")
+    print("\n🤖 AI FEATURES:")
+    print("   ✓ Future price predictions (30 days)")
+    print("   ✓ Advanced technical indicators (RSI, MACD, Bollinger Bands)")
+    print("   ✓ Risk scoring & analysis")
+    print("   ✓ Volume trend analysis")
+    print("   ✓ Machine learning predictions")
+    print("\n🌍 GLOBAL MARKET SUPPORT via Finnhub:")
     print("   ✓ US Stocks: AAPL, MSFT, GOOGL, TSLA")
-    print("   ✓ India NSE: TCS.NS, RELIANCE.NS, INFY.NS")
-    print("   ✓ India BSE: TCS.BO, RELIANCE.BO, INFY.BO")
-    print("   ✓ UK, Europe, Asia markets")
-    print("\n✅ Ready to analyze portfolios!")
+    print("   ✓ India NSE: RELIANCE.NS, TCS.NS, INFY.NS")
+    print("   ✓ India BSE: RELIANCE.BO, TCS.BO, INFY.BO")
+    print("   ✓ UK, Europe, Asia, and more!")
+    print("\n✅ Ready to analyze your portfolio!")
     print("=" * 60)
     
     app.run(host='0.0.0.0', port=port, debug=debug)
