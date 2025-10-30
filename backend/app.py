@@ -18,9 +18,8 @@ import requests
 app = Flask(__name__)
 
 # Finnhub API Configuration
-FINNHUB_API_KEY = os.environ.get('FINNHUB_API_KEY', 'd3uqcohr01qil4ar9v50d3uqcohr01qil4ar9v5g')  # Free tier key
-FINNHUB_BASE_URL = 'https://finnhub.io/api/v1'
-
+TWELVEDATA_API_KEY = os.environ.get('TWELVEDATA_API_KEY', '0ed25ba3dd2c4e9e8edfcad37d5404c6')  # Free tier key
+TWELVEDATA_BASE_URL = 'https://api.twelvedata.com/'
 # Secret key for sessions
 app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key-change-this-in-production')
 
